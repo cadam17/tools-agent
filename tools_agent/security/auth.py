@@ -1,26 +1,41 @@
 import os
-import asyncio
 from langgraph_sdk import Auth
 from langgraph_sdk.auth.types import StudioUser
-from supabase import create_client, Client
 from typing import Optional, Any
+import httpx
+from typing import Dict
 
-supabase_url = os.environ.get("SUPABASE_URL")
-supabase_key = os.environ.get("SUPABASE_KEY")
-supabase: Optional[Client] = None
+# Initialize Clerk API key from environment variable
+clerk_api_key = os.environ.get("CLERK_SECRET_KEY")
+clerk_api_base = "https://api.clerk.dev/v1"
 
-if supabase_url and supabase_key:
-    supabase = create_client(supabase_url, supabase_key)
+if not clerk_api_key:
+    raise ValueError("CLERK_SECRET_KEY environment variable is required")
 
-# The "Auth" object is a container that LangGraph will use to mark our authentication function
 auth = Auth()
 
+async def verify_clerk_token(token: str) -> Dict[str, Any]:
+    """Verify a Clerk session token and return user data."""
+    async with httpx.AsyncClient() as client:
+        headers = {
+            "Authorization": f"Bearer {clerk_api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        response = await client.get(
+            f"{clerk_api_base}/sessions/{token}",
+            headers=headers
+        )
+        
+        if response.status_code != 200:
+            raise ValueError("Invalid token")
+            
+        session_data = response.json()
+        return session_data
 
-# The `authenticate` decorator tells LangGraph to call this function as middleware
-# for every request. This will determine whether the request is allowed or not
 @auth.authenticate
 async def get_current_user(authorization: str | None) -> Auth.types.MinimalUserDict:
-    """Check if the user's JWT token is valid using Supabase."""
+    """Check if the user's JWT token is valid using Clerk."""
 
     # Ensure we have authorization header
     if not authorization:
@@ -37,37 +52,25 @@ async def get_current_user(authorization: str | None) -> Auth.types.MinimalUserD
             status_code=401, detail="Invalid authorization header format"
         )
 
-    # Ensure Supabase client is initialized
-    if not supabase:
-        raise Auth.exceptions.HTTPException(
-            status_code=500, detail="Supabase client not initialized"
-        )
-
     try:
-        # Verify the JWT token with Supabase using asyncio.to_thread to avoid blocking
-        # This will decode and verify the JWT token in a separate thread
-        async def verify_token() -> dict[str, Any]:
-            response = await asyncio.to_thread(supabase.auth.get_user, token)
-            return response
+        # Verify the token with Clerk
+        session_data = await verify_clerk_token(token)
+        user_id = session_data["user_id"]
 
-        response = await verify_token()
-        user = response.user
-
-        if not user:
+        if not user_id:
             raise Auth.exceptions.HTTPException(
                 status_code=401, detail="Invalid token or user not found"
             )
 
         # Return user info if valid
         return {
-            "identity": user.id,
+            "identity": user_id,
         }
     except Exception as e:
-        # Handle any errors from Supabase
+        # Handle any errors from Clerk
         raise Auth.exceptions.HTTPException(
             status_code=401, detail=f"Authentication error: {str(e)}"
         )
-
 
 @auth.on.threads.create
 @auth.on.threads.create_run
